@@ -71,10 +71,10 @@ def com_adobe_fonts_check_stat_has_axis_value_tables(ttFont, is_variable_font):
 
     if is_variable_font:
         # Collect all the values defined for each design axis in the STAT table.
-        stat_axes_values = {}
+        stat_axes_value_ranges = {}
         for axis_index, axis in enumerate(stat_table.DesignAxisRecord.Axis):
             axis_tag = axis.AxisTag
-            axis_values = set()
+            axis_value_ranges = set()
 
             # Iterate over Axis Value tables.
             for axis_value in stat_table.AxisValueArray.AxisValue:
@@ -86,9 +86,9 @@ def com_adobe_fonts_check_stat_has_axis_value_tables(ttFont, is_variable_font):
                         continue
 
                     if axis_value_format == 2:
-                        axis_values.add(axis_value.NominalValue)
+                        axis_value_ranges.add((axis_value.RangeMinValue, axis_value.RangeMaxValue))
                     else:
-                        axis_values.add(axis_value.Value)
+                        axis_value_ranges.add((axis_value.Value, axis_value.Value))
 
                 elif axis_value_format == 4:
                     # check that axisCount > 1. Also, format 4 records DO NOT
@@ -108,17 +108,25 @@ def com_adobe_fonts_check_stat_has_axis_value_tables(ttFont, is_variable_font):
                       f"AxisValue format {axis_value_format} is unknown.",
                   )
 
-            stat_axes_values[axis_tag] = axis_values
+            stat_axes_value_ranges[axis_tag] = axis_value_ranges
 
         # Iterate over the 'fvar' named instances, and confirm that every coordinate
         # can be represented by the STAT table Axis Value tables.
         for inst in ttFont["fvar"].instances:
             for coord_axis_tag, coord_axis_value in inst.coordinates.items():
-                if (
-                    coord_axis_tag in stat_axes_values
-                    and coord_axis_value in stat_axes_values[coord_axis_tag]
-                ):
-                    continue
+                # if (
+                #     coord_axis_tag in stat_axes_value_ranges
+                #     and coord_axis_value in stat_axes_value_ranges[coord_axis_tag]
+                # ):
+                rg_set = stat_axes_value_ranges.get(coord_axis_tag)
+                found = False
+                if rg_set is not None:
+                  for rg in rg_set:
+                    if rg[0] <= coord_axis_value <= rg[1]:
+                      found = True
+
+                if found:
+                  continue
 
                 yield FAIL, Message(
                     "missing-axis-value-table",

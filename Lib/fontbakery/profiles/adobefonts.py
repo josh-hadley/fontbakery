@@ -35,6 +35,7 @@ SET_EXPLICIT_CHECKS = {
     "com.adobe.fonts/check/nameid_1_win_english",
     "com.adobe.fonts/check/unsupported_tables",
     "com.adobe.fonts/check/STAT_strings",
+    "com.adobe.fonts/check/varfont/bold_wght_coord",
     #
     # =======================================
     # From cff.py
@@ -55,7 +56,7 @@ SET_EXPLICIT_CHECKS = {
     # "com.fontwerk/check/style_linking",  # PERMANENTLY_EXCLUDED
     # "com.fontwerk/check/vendor_id",      # PERMANENTLY_EXCLUDED
     # "com.fontwerk/check/no_mac_entries",
-    "com.fontwerk/check/inconsistencies_between_fvar_stat",
+    "com.fontwerk/check/inconsistencies_between_fvar_stat",  # IS_OVERRIDDEN
     "com.fontwerk/check/weight_class_fvar",
     #
     # =======================================
@@ -206,6 +207,7 @@ CHECKS_IN_THIS_FILE = [
     "com.adobe.fonts/check/nameid_1_win_english",
     "com.adobe.fonts/check/unsupported_tables",
     "com.adobe.fonts/check/STAT_strings",
+    "com.adobe.fonts/check/varfont/bold_wght_coord",
 ]
 
 SET_IMPORTED_CHECKS = set(
@@ -221,6 +223,7 @@ ADOBEFONTS_PROFILE_CHECKS = [
 
 OVERRIDDEN_CHECKS = [
     "com.adobe.fonts/check/freetype_rasterizer",
+    "com.fontwerk/check/inconsistencies_between_fvar_stat",
     "com.google.fonts/check/family/win_ascent_and_descent",
     "com.google.fonts/check/fontbakery_version",
     "com.google.fonts/check/name/match_familyname_fullfont",
@@ -477,12 +480,101 @@ def com_adobe_fonts_check_STAT_strings(ttFont):
         yield PASS, "Looks good!"
 
 
+@check(
+    id = 'com.adobe.fonts/check/varfont/bold_wght_coord',
+    rationale = """
+        The Open-Type spec's registered
+        design-variation tag 'wght' available at
+        https://docs.microsoft.com/en-gb/typography/opentype/spec/dvaraxistag_wght
+        does not specify a required value for the 'Bold' instance of a variable font.
+
+        For com.google.fonts, Dave Crossland suggests enforcement of a required value
+        of 700, but Adobe considers this too restrictive. Instead, this check tries
+        to determine whether the bold_wght_coord is within the value range of the STAT
+        AxisValue table for 'wght' axis with name 'Bold'.
+    """,
+    conditions = ['is_variable_font',
+                  'has_wght_axis'],
+    proposal = 'https://github.com/googlefonts/fontbakery/issues/1707'
+)
+def com_adobe_fonts_check_varfont_bold_wght_coord(ttFont, bold_wght_coord):
+    """The variable font 'wght' (Weight) axis coordinate must be within range of the STAT
+    AxisValue table for 'wght' axis with name 'Bold'."""
+
+    if bold_wght_coord is None:
+        yield PASS, "Adobe does not require a 'Bold' named instance."
+
+    if 'STAT' not in ttFont:
+        # FAIL, because we've overridden the other check. We do *not* include 'has_STAT_table'
+        # in 'conditions' because the check would be SKIPped, which we don't want.
+        yield FAIL,\
+            Message("no-stat-table",
+                    f'bold_wght_coord check could not be completed because'
+                    ' the font does not contain a "STAT" table which is'
+                    ' required for the check.')
+
+    # try to find an AxisValue table for 'wght' that is "Bold"
+    # if it's a format2 (range), check whether bold_wght_coord is
+    # in the range -- more lenient than fvar single coord
+    stat_bold_range = None
+    stat_table = ttFont['STAT'].table
+    name_table = ttFont['name']
+    stat_wght_index = None
+    # find the index of the 'wght' axis
+    for axis_index, axis in enumerate(stat_table.DesignAxisRecord.Axis):
+        if axis.AxisTag == 'wght':
+            stat_wght_index = axis_index
+            break
+
+    # iterate through the AxisValue tables, see if we can find
+    # one for 'wght' axis whose name is 'Bold'
+    for axis_value in stat_table.AxisValueArray.AxisValue:
+        if axis_value.Format in (1, 2, 3):
+            if axis_value.AxisIndex == stat_wght_index:
+                nameid = axis_value.ValueNameID
+                namestring = name_table.getDebugName(nameid)
+                if namestring is not None and namestring.lower() == 'bold':
+                    if axis_value.Format == 2:
+                        stat_bold_range = (
+                            axis_value.RangeMinValue,
+                            axis_value.RangeMaxValue
+                        )
+                    else:
+                        stat_bold_range = (
+                            axis_value.Value,
+                            axis_value.Value
+                        )
+
+    if stat_bold_range is None:
+        stat_bold_range = (bold_wght_coord, bold_wght_coord)
+
+    if stat_bold_range[0] <= bold_wght_coord <= stat_bold_range[1]:
+        yield PASS, "'fvar' bold instance coordinate is OK."
+    else:
+        yield FAIL,\
+            Message("wght-not-in-range",
+                    f'The "wght" axis coordinate of the "Bold" instance {bold_wght_coord}'
+                    ' must be within the range of the corresponding STAT AxisValue table'
+                    f' ({stat_bold_range[0]}, {stat_bold_range[1]}).')
+
+
 profile.auto_register(
     globals(),
     filter_func=lambda _, checkid, __: checkid
     not in SET_IMPORTED_CHECKS - SET_EXPLICIT_CHECKS,
 )
 
+
+profile.check_log_override(
+    # From fontwerk.py
+    "com.fontwerk/check/inconsistencies_between_fvar_stat",
+    overrides=(("missing-fvar-instance-axis-value", WARN, KEEP_ORIGINAL_MESSAGE),),
+    reason=(
+        "This largely overlaps the check in"
+        " com.adobe.fonts/check/stat_has_axis_value_tables"
+        " but uses more strict logic."
+    ),
+)
 
 profile.check_log_override(
     # From universal.py
@@ -565,10 +657,12 @@ profile.check_log_override(
 profile.check_log_override(
     # From fvar.py
     "com.google.fonts/check/varfont/bold_wght_coord",
-    overrides=(("no-bold-instance", WARN, KEEP_ORIGINAL_MESSAGE),),
+    overrides=(("no-bold-instance", WARN, KEEP_ORIGINAL_MESSAGE),
+               ("wght-not-700", WARN, "'wght' axis coordinate is not 700"),),
     reason=(
-        "Adobe doesn't require a 'Bold' named instance (but when a 'Bold' instance"
-        " is present, its coordinate on the 'wght' axis must be == 700)."
+        "Adobe doesn't require a 'Bold' named instance. When a 'Bold' fvar instance is"
+        " present, its coordinate on the 'wght' axis is recommended but not required be"
+        " 700. It must still be within range of the corresponding STAT AxisValue record.",
     ),
 )
 
